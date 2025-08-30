@@ -72,11 +72,42 @@ type Options struct {
 	ConnMaxIdleTime time.Duration
 	ConnMaxLifetime time.Duration
 
+	MaxConcurrentDials int
+
 	ReadBufferSize  int
 	WriteBufferSize int
 }
 
 type lastDialErrorWrap struct {
+	err error
+}
+
+type wantConn struct {
+	mu        sync.Mutex      // protects ctx, done and sending of the result
+	ctx       context.Context // context for dial, cleared after delivered or canceled
+	cancelCtx context.CancelFunc
+	done      bool                // true after delivered or canceled
+	result    chan wantConnResult // channel to deliver connection or error
+}
+
+func (w *wantConn) tryDeliver(cn *Conn, err error) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.done {
+		return false
+	}
+
+	w.done = true
+	w.ctx = nil
+
+	w.result <- wantConnResult{cn: cn, err: err}
+	close(w.result)
+
+	return true
+}
+
+type wantConnResult struct {
+	cn  *Conn
 	err error
 }
 
@@ -86,7 +117,8 @@ type ConnPool struct {
 	dialErrorsNum uint32 // atomic
 	lastDialError atomic.Value
 
-	queue chan struct{}
+	queue           chan struct{}
+	dialsInProgress chan struct{}
 
 	connsMu   sync.Mutex
 	conns     []*Conn
@@ -107,7 +139,9 @@ func NewConnPool(opt *Options) *ConnPool {
 	p := &ConnPool{
 		cfg: opt,
 
-		queue:     make(chan struct{}, opt.PoolSize),
+		queue:           make(chan struct{}, opt.PoolSize),
+		dialsInProgress: make(chan struct{}, opt.MaxConcurrentDials),
+
 		conns:     make([]*Conn, 0, opt.PoolSize),
 		idleConns: make([]*Conn, 0, opt.PoolSize),
 	}
@@ -316,13 +350,46 @@ func (p *ConnPool) Get(ctx context.Context) (*Conn, error) {
 
 	atomic.AddUint32(&p.stats.Misses, 1)
 
-	newcn, err := p.newConn(ctx, true)
-	if err != nil {
+	return p.asyncNewConn(ctx)
+}
+
+func (p *ConnPool) asyncNewConn(ctx context.Context) (*Conn, error) {
+	// First try to acquire permission to create a connection
+	select {
+	case p.dialsInProgress <- struct{}{}:
+		// Got permission, proceed to create connection
+	case <-ctx.Done():
 		p.freeTurn()
-		return nil, err
+		return nil, ctx.Err()
 	}
 
-	return newcn, nil
+	dialCtx, cancel := context.WithTimeout(ctx, p.cfg.DialTimeout)
+
+	w := &wantConn{
+		ctx:       dialCtx,
+		cancelCtx: cancel,
+		result:    make(chan wantConnResult, 1),
+	}
+
+	go func(w *wantConn) {
+		defer w.cancelCtx()
+		defer func() { <-p.dialsInProgress }() // Release connection creation permission
+
+		cn, err := p.newConn(w.ctx, true)
+		delivered := w.tryDeliver(cn, err)
+		if err == nil && !delivered {
+			p.Put(w.ctx, cn)
+		} else {
+			p.freeTurn()
+		}
+	}(w)
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-w.result:
+		return result.cn, result.err
+	}
 }
 
 func (p *ConnPool) waitTurn(ctx context.Context) error {

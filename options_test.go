@@ -68,6 +68,12 @@ func TestParseURL(t *testing.T) {
 			url: "redis://localhost:123/?db=2&protocol=2", // RESP Protocol
 			o:   &Options{Addr: "localhost:123", DB: 2, Protocol: 2},
 		}, {
+			url: "redis://localhost:123/?max_concurrent_dials=5", // MaxConcurrentDials parameter
+			o:   &Options{Addr: "localhost:123", MaxConcurrentDials: 5},
+		}, {
+			url: "redis://localhost:123/?max_concurrent_dials=0", // MaxConcurrentDials zero value
+			o:   &Options{Addr: "localhost:123", MaxConcurrentDials: 0},
+		}, {
 			url: "unix:///tmp/redis.sock",
 			o:   &Options{Addr: "/tmp/redis.sock"},
 		}, {
@@ -197,6 +203,9 @@ func comprareOptions(t *testing.T, actual, expected *Options) {
 	if actual.ConnMaxLifetime != expected.ConnMaxLifetime {
 		t.Errorf("ConnMaxLifetime: got %v, expected %v", actual.ConnMaxLifetime, expected.ConnMaxLifetime)
 	}
+	if actual.MaxConcurrentDials != expected.MaxConcurrentDials {
+		t.Errorf("MaxConcurrentDials: got %v, expected %v", actual.MaxConcurrentDials, expected.MaxConcurrentDials)
+	}
 }
 
 // Test ReadTimeout option initialization, including special values -1 and 0.
@@ -243,5 +252,107 @@ func TestProtocolOptions(t *testing.T) {
 		if o.Protocol != want {
 			t.Errorf("got %d instead of %d as protocol option", o.Protocol, want)
 		}
+	}
+}
+
+func TestMaxConcurrentDialsOptions(t *testing.T) {
+	// Test cases for MaxConcurrentDials initialization logic
+	testCases := []struct {
+		name                    string
+		poolSize                int
+		maxConcurrentDials      int
+		expectedConcurrentDials int
+	}{
+		{
+			name:                    "zero value with default pool size",
+			poolSize:                0, // will become 10 * GOMAXPROCS in init()
+			maxConcurrentDials:      0,
+			expectedConcurrentDials: 0, // will be calculated in init()
+		},
+		{
+			name:                    "zero value with custom pool size 8",
+			poolSize:                8,
+			maxConcurrentDials:      0,
+			expectedConcurrentDials: 3, // 8/4+1 = 3
+		},
+		{
+			name:                    "zero value with custom pool size 20",
+			poolSize:                20,
+			maxConcurrentDials:      0,
+			expectedConcurrentDials: 6, // 20/4+1 = 6
+		},
+		{
+			name:                    "zero value with pool size 1",
+			poolSize:                1,
+			maxConcurrentDials:      0,
+			expectedConcurrentDials: 1, // 1/4+1 = 1
+		},
+		{
+			name:                    "zero value with pool size 3",
+			poolSize:                3,
+			maxConcurrentDials:      0,
+			expectedConcurrentDials: 1, // 3/4+1 = 1
+		},
+		{
+			name:                    "zero value with pool size 100",
+			poolSize:                100,
+			maxConcurrentDials:      0,
+			expectedConcurrentDials: 26, // 100/4+1 = 26
+		},
+		{
+			name:                    "explicit positive value",
+			poolSize:                10,
+			maxConcurrentDials:      5,
+			expectedConcurrentDials: 5, // should remain unchanged
+		},
+		{
+			name:                    "negative value unlimited",
+			poolSize:                10,
+			maxConcurrentDials:      -1,
+			expectedConcurrentDials: 10, // negative means unlimited, set to PoolSize
+		},
+		{
+			name:                    "negative value unlimited with large pool",
+			poolSize:                50,
+			maxConcurrentDials:      -5,
+			expectedConcurrentDials: 50, // negative means unlimited, set to PoolSize
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := &Options{
+				PoolSize:           tc.poolSize,
+				MaxConcurrentDials: tc.maxConcurrentDials,
+			}
+			opts.init()
+
+			if tc.expectedConcurrentDials == 0 {
+				// For default pool size case, calculate expected value
+				if tc.poolSize == 0 {
+					expectedPoolSize := opts.PoolSize // PoolSize was set by init()
+					tc.expectedConcurrentDials = expectedPoolSize/4 + 1
+					if tc.expectedConcurrentDials > expectedPoolSize {
+						tc.expectedConcurrentDials = expectedPoolSize
+					}
+				}
+			}
+
+			if opts.MaxConcurrentDials != tc.expectedConcurrentDials {
+				t.Errorf("MaxConcurrentDials: got %v, expected %v (PoolSize=%v)",
+					opts.MaxConcurrentDials, tc.expectedConcurrentDials, opts.PoolSize)
+			}
+
+			// Ensure MaxConcurrentDials never exceeds PoolSize
+			if opts.MaxConcurrentDials > opts.PoolSize {
+				t.Errorf("MaxConcurrentDials (%v) should not exceed PoolSize (%v)",
+					opts.MaxConcurrentDials, opts.PoolSize)
+			}
+
+			// Ensure MaxConcurrentDials is always positive
+			if opts.MaxConcurrentDials <= 0 {
+				t.Errorf("MaxConcurrentDials should be positive, got %v", opts.MaxConcurrentDials)
+			}
+		})
 	}
 }

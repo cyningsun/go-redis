@@ -2,6 +2,7 @@ package pool_test
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -377,8 +378,8 @@ var _ = Describe("race", func() {
 			state := p.Stats()
 			return state.TotalConns == 0 && state.IdleConns == 0 && p.QueueLen() == 0
 		}, "3s", "50ms").Should(BeTrue())
-  })
-  
+	})
+
 	It("wait", func() {
 		opt := &pool.Options{
 			Dialer: func(ctx context.Context) (net.Conn, error) {
@@ -433,5 +434,82 @@ var _ = Describe("race", func() {
 
 		stats = p.Stats()
 		Expect(stats.Timeouts).To(Equal(uint32(1)))
+	})
+})
+
+var _ = Describe("asyncNewConn", func() {
+	ctx := context.Background()
+
+	It("should successfully create connection when pool is exhausted", func() {
+		testPool := pool.NewConnPool(&pool.Options{
+			Dialer:             dummyDialer,
+			PoolSize:           1,
+			MaxConcurrentDials: 2,
+			DialTimeout:        1 * time.Second,
+			PoolTimeout:        1 * time.Second,
+		})
+		defer testPool.Close()
+
+		// Fill the pool
+		conn1, err := testPool.Get(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(conn1).NotTo(BeNil())
+
+		// This should trigger asyncNewConn since pool is exhausted
+		conn2, err := testPool.Get(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(conn2).NotTo(BeNil())
+
+		// Basic validation - we got two different connections
+		Expect(conn1).NotTo(Equal(conn2))
+
+		// Close connections without Put to avoid queue issues
+		_ = conn1.Close()
+		_ = conn2.Close()
+	})
+
+	It("should handle context cancellation", func() {
+		testPool := pool.NewConnPool(&pool.Options{
+			Dialer:             dummyDialer,
+			PoolSize:           1,
+			MaxConcurrentDials: 1,
+			DialTimeout:        1 * time.Second,
+			PoolTimeout:        1 * time.Second,
+		})
+		defer testPool.Close()
+
+		// Get the only connection
+		conn1, err := testPool.Get(ctx)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Create cancelled context
+		cancelledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		// This should fail immediately with context cancelled
+		_, err = testPool.Get(cancelledCtx)
+		Expect(err).To(Equal(context.Canceled))
+
+		_ = conn1.Close()
+	})
+
+	It("should handle dial failures gracefully", func() {
+		alwaysFailDialer := func(ctx context.Context) (net.Conn, error) {
+			return nil, fmt.Errorf("dial failed")
+		}
+
+		testPool := pool.NewConnPool(&pool.Options{
+			Dialer:             alwaysFailDialer,
+			PoolSize:           1,
+			MaxConcurrentDials: 1,
+			DialTimeout:        1 * time.Second,
+			PoolTimeout:        1 * time.Second,
+		})
+		defer testPool.Close()
+
+		// This call should fail
+		_, err := testPool.Get(ctx)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("dial failed"))
 	})
 })
