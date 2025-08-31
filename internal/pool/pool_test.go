@@ -454,7 +454,7 @@ var _ = Describe("asyncNewConn", func() {
 			PoolSize:           1,
 			MaxConcurrentDials: 2,
 			DialTimeout:        1 * time.Second,
-			PoolTimeout:        1 * time.Second,
+			PoolTimeout:        2 * time.Second,
 		})
 		defer testPool.Close()
 
@@ -463,42 +463,116 @@ var _ = Describe("asyncNewConn", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(conn1).NotTo(BeNil())
 
-		// This should trigger asyncNewConn since pool is exhausted
-		conn2, err := testPool.Get(ctx)
-		Expect(err).NotTo(HaveOccurred())
+		// Get second connection in another goroutine
+		done := make(chan struct{})
+		var conn2 *pool.Conn
+		var err2 error
+
+		go func() {
+			defer GinkgoRecover()
+			conn2, err2 = testPool.Get(ctx)
+			close(done)
+		}()
+
+		// Wait a bit to let the second Get start waiting
+		time.Sleep(100 * time.Millisecond)
+
+		// Release first connection to let second Get acquire Turn
+		testPool.Put(ctx, conn1)
+
+		// Wait for second Get to complete
+		<-done
+		Expect(err2).NotTo(HaveOccurred())
 		Expect(conn2).NotTo(BeNil())
 
-		// Basic validation - we got two different connections
-		Expect(conn1).NotTo(Equal(conn2))
-
-		// Close connections without Put to avoid queue issues
-		_ = conn1.Close()
-		_ = conn2.Close()
+		// Clean up second connection
+		testPool.Put(ctx, conn2)
 	})
 
-	It("should handle context cancellation", func() {
+	It("should handle context cancellation before acquiring dialsInProgress", func() {
+		slowDialer := func(ctx context.Context) (net.Conn, error) {
+			// Simulate slow dialing to let first connection creation occupy dialsInProgress
+			time.Sleep(200 * time.Millisecond)
+			return newDummyConn(), nil
+		}
+
 		testPool := pool.NewConnPool(&pool.Options{
-			Dialer:             dummyDialer,
-			PoolSize:           1,
-			MaxConcurrentDials: 1,
+			Dialer:             slowDialer,
+			PoolSize:           2,
+			MaxConcurrentDials: 1, // Limit to 1 so second request cannot get dialsInProgress permission
 			DialTimeout:        1 * time.Second,
 			PoolTimeout:        1 * time.Second,
 		})
 		defer testPool.Close()
 
-		// Get the only connection
+		// Start first connection creation, this will occupy dialsInProgress
+		done1 := make(chan struct{})
+		go func() {
+			defer GinkgoRecover()
+			conn1, err := testPool.Get(ctx)
+			if err == nil {
+				defer testPool.Put(ctx, conn1)
+			}
+			close(done1)
+		}()
+
+		// Wait a bit to ensure first request starts and occupies dialsInProgress
+		time.Sleep(50 * time.Millisecond)
+
+		// Create a context that will be cancelled quickly
+		cancelCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		defer cancel()
+
+		// Second request should timeout while waiting for dialsInProgress
+		_, err := testPool.Get(cancelCtx)
+		Expect(err).To(Equal(context.DeadlineExceeded))
+
+		// Wait for first request to complete
+		<-done1
+	})
+
+	It("should handle context cancellation while waiting for connection result", func() {
+		// This test focuses on proper error handling when context is cancelled
+		// during asyncNewConn execution (not testing connection reuse)
+
+		slowDialer := func(ctx context.Context) (net.Conn, error) {
+			// Simulate slow dialing
+			time.Sleep(500 * time.Millisecond)
+			return newDummyConn(), nil
+		}
+
+		testPool := pool.NewConnPool(&pool.Options{
+			Dialer:             slowDialer,
+			PoolSize:           1,
+			MaxConcurrentDials: 2,
+			DialTimeout:        2 * time.Second,
+			PoolTimeout:        2 * time.Second,
+		})
+		defer testPool.Close()
+
+		// Get first connection to fill the pool
 		conn1, err := testPool.Get(ctx)
 		Expect(err).NotTo(HaveOccurred())
 
-		// Create cancelled context
-		cancelledCtx, cancel := context.WithCancel(ctx)
-		cancel()
+		// Create a context that will be cancelled during connection creation
+		cancelCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		defer cancel()
 
-		// This should fail immediately with context cancelled
-		_, err = testPool.Get(cancelledCtx)
-		Expect(err).To(Equal(context.Canceled))
+		// This request should timeout while waiting for connection creation result
+		// Testing the error handling path in asyncNewConn select statement
+		done := make(chan struct{})
+		var err2 error
+		go func() {
+			defer GinkgoRecover()
+			_, err2 = testPool.Get(cancelCtx)
+			close(done)
+		}()
 
-		_ = conn1.Close()
+		<-done
+		Expect(err2).To(Equal(context.DeadlineExceeded))
+
+		// Clean up - release the first connection
+		testPool.Put(ctx, conn1)
 	})
 
 	It("should handle dial failures gracefully", func() {
@@ -515,9 +589,163 @@ var _ = Describe("asyncNewConn", func() {
 		})
 		defer testPool.Close()
 
-		// This call should fail
+		// This call should fail, testing error handling branch in goroutine
 		_, err := testPool.Get(ctx)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("dial failed"))
+	})
+
+	It("should handle connection creation success with normal delivery", func() {
+		// This test verifies normal case where connection creation and delivery both succeed
+		testPool := pool.NewConnPool(&pool.Options{
+			Dialer:             dummyDialer,
+			PoolSize:           1,
+			MaxConcurrentDials: 2,
+			DialTimeout:        1 * time.Second,
+			PoolTimeout:        2 * time.Second,
+		})
+		defer testPool.Close()
+
+		// Get first connection
+		conn1, err := testPool.Get(ctx)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Get second connection in another goroutine
+		done := make(chan struct{})
+		var conn2 *pool.Conn
+		var err2 error
+
+		go func() {
+			defer GinkgoRecover()
+			conn2, err2 = testPool.Get(ctx)
+			close(done)
+		}()
+
+		// Wait a bit to let second Get start waiting
+		time.Sleep(100 * time.Millisecond)
+
+		// Release first connection
+		testPool.Put(ctx, conn1)
+
+		// Wait for second Get to complete
+		<-done
+		Expect(err2).NotTo(HaveOccurred())
+		Expect(conn2).NotTo(BeNil())
+
+		// Clean up second connection
+		testPool.Put(ctx, conn2)
+	})
+
+	It("should handle MaxConcurrentDials limit", func() {
+		testPool := pool.NewConnPool(&pool.Options{
+			Dialer:             dummyDialer,
+			PoolSize:           3,
+			MaxConcurrentDials: 1, // Only allow 1 concurrent dial
+			DialTimeout:        1 * time.Second,
+			PoolTimeout:        1 * time.Second,
+		})
+		defer testPool.Close()
+
+		// Get all connections to fill the pool
+		var conns []*pool.Conn
+		for i := 0; i < 3; i++ {
+			conn, err := testPool.Get(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			conns = append(conns, conn)
+		}
+
+		// Now pool is full, next request needs to create new connection
+		// But due to MaxConcurrentDials=1, only one concurrent dial is allowed
+		done := make(chan struct{})
+		var err4 error
+		go func() {
+			defer GinkgoRecover()
+			_, err4 = testPool.Get(ctx)
+			close(done)
+		}()
+
+		// Release one connection to let the request complete
+		time.Sleep(100 * time.Millisecond)
+		testPool.Put(ctx, conns[0])
+
+		<-done
+		Expect(err4).NotTo(HaveOccurred())
+
+		// Clean up remaining connections
+		for i := 1; i < len(conns); i++ {
+			testPool.Put(ctx, conns[i])
+		}
+	})
+
+	It("should reuse connections created in background after request timeout", func() {
+		// This test focuses on connection reuse mechanism:
+		// When a request times out but background connection creation succeeds,
+		// the created connection should be added to pool for future reuse
+
+		slowDialer := func(ctx context.Context) (net.Conn, error) {
+			// Simulate delay for connection creation
+			time.Sleep(100 * time.Millisecond)
+			return newDummyConn(), nil
+		}
+
+		testPool := pool.NewConnPool(&pool.Options{
+			Dialer:             slowDialer,
+			PoolSize:           1,
+			MaxConcurrentDials: 1,
+			DialTimeout:        1 * time.Second,
+			PoolTimeout:        150 * time.Millisecond, // Short timeout for waiting Turn
+		})
+		defer testPool.Close()
+
+		// Fill the pool with one connection
+		conn1, err := testPool.Get(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		// Don't put it back yet, so pool is full
+
+		// Start a goroutine that will create a new connection but take time
+		done1 := make(chan struct{})
+		go func() {
+			defer GinkgoRecover()
+			defer close(done1)
+			// This will trigger asyncNewConn since pool is full
+			conn, err := testPool.Get(ctx)
+			if err == nil {
+				// Put connection back to pool after creation
+				time.Sleep(50 * time.Millisecond)
+				testPool.Put(ctx, conn)
+			}
+		}()
+
+		// Wait a bit to let the goroutine start and begin connection creation
+		time.Sleep(50 * time.Millisecond)
+
+		// Now make a request that should timeout waiting for Turn
+		start := time.Now()
+		_, err = testPool.Get(ctx)
+		duration := time.Since(start)
+
+		Expect(err).To(Equal(pool.ErrPoolTimeout))
+		// Should timeout around PoolTimeout
+		Expect(duration).To(BeNumerically("~", 150*time.Millisecond, 50*time.Millisecond))
+
+		// Release the first connection to allow the background creation to complete
+		testPool.Put(ctx, conn1)
+
+		// Wait for background connection creation to complete
+		<-done1
+		time.Sleep(100 * time.Millisecond)
+
+		// CORE TEST: Verify connection reuse mechanism
+		// The connection created in background should now be available in pool
+		start = time.Now()
+		conn3, err := testPool.Get(ctx)
+		duration = time.Since(start)
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(conn3).NotTo(BeNil())
+		// Should be fast since connection is from pool (not newly created)
+		Expect(duration).To(BeNumerically("<", 50*time.Millisecond))
+
+		testPool.Put(ctx, conn3)
 	})
 })

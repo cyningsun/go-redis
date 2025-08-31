@@ -31,7 +31,6 @@ type Limiter interface {
 
 // Options keeps the settings to set up redis connection.
 type Options struct {
-
 	// Network type, either tcp or unix.
 	//
 	// default: is tcp.
@@ -266,13 +265,8 @@ func (opt *Options) init() {
 		opt.PoolSize = 10 * runtime.GOMAXPROCS(0)
 	}
 	if opt.MaxConcurrentDials == 0 {
-		// Default to PoolSize/4+1, at least 1, at most PoolSize
-		opt.MaxConcurrentDials = opt.PoolSize/4 + 1
-		if opt.MaxConcurrentDials > opt.PoolSize {
-			opt.MaxConcurrentDials = opt.PoolSize
-		}
-	} else if opt.MaxConcurrentDials < 0 {
-		// Negative value means unlimited, set to PoolSize
+		opt.MaxConcurrentDials = opt.PoolSize
+	} else if opt.MaxConcurrentDials > opt.PoolSize {
 		opt.MaxConcurrentDials = opt.PoolSize
 	}
 	if opt.ReadBufferSize == 0 {
