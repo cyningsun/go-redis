@@ -264,7 +264,7 @@ func (opt *Options) init() {
 	if opt.PoolSize == 0 {
 		opt.PoolSize = 10 * runtime.GOMAXPROCS(0)
 	}
-	if opt.MaxConcurrentDials == 0 {
+	if opt.MaxConcurrentDials <= 0 {
 		opt.MaxConcurrentDials = opt.PoolSize
 	} else if opt.MaxConcurrentDials > opt.PoolSize {
 		opt.MaxConcurrentDials = opt.PoolSize
