@@ -377,9 +377,11 @@ func (p *ConnPool) asyncNewConn(ctx context.Context) (*Conn, error) {
 
 		cn, err := p.newConn(w.ctx, true)
 		delivered := w.tryDeliver(cn, err)
-		if err == nil && !delivered {
+		if err == nil && delivered {
+			return
+		} else if err == nil && !delivered {
 			p.Put(w.ctx, cn)
-		} else {
+		} else { // freeTurn after error
 			p.freeTurn()
 		}
 	}(w)

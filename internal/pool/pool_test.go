@@ -20,11 +20,12 @@ var _ = Describe("ConnPool", func() {
 
 	BeforeEach(func() {
 		connPool = pool.NewConnPool(&pool.Options{
-			Dialer:          dummyDialer,
-			PoolSize:        10,
-			PoolTimeout:     time.Hour,
-			DialTimeout:     1 * time.Second,
-			ConnMaxIdleTime: time.Millisecond,
+			Dialer:             dummyDialer,
+			PoolSize:           10,
+			MaxConcurrentDials: 10,
+			PoolTimeout:        time.Hour,
+			DialTimeout:        1 * time.Second,
+			ConnMaxIdleTime:    time.Millisecond,
 		})
 	})
 
@@ -46,11 +47,12 @@ var _ = Describe("ConnPool", func() {
 				<-closedChan
 				return &net.TCPConn{}, nil
 			},
-			PoolSize:        10,
-			PoolTimeout:     time.Hour,
-			DialTimeout:     1 * time.Second,
-			ConnMaxIdleTime: time.Millisecond,
-			MinIdleConns:    minIdleConns,
+			PoolSize:           10,
+			MaxConcurrentDials: 10,
+			PoolTimeout:        time.Hour,
+			DialTimeout:        1 * time.Second,
+			ConnMaxIdleTime:    time.Millisecond,
+			MinIdleConns:       minIdleConns,
 		})
 		wg.Wait()
 		Expect(connPool.Close()).NotTo(HaveOccurred())
@@ -130,12 +132,13 @@ var _ = Describe("MinIdleConns", func() {
 
 	newConnPool := func() *pool.ConnPool {
 		connPool := pool.NewConnPool(&pool.Options{
-			Dialer:          dummyDialer,
-			PoolSize:        poolSize,
-			MinIdleConns:    minIdleConns,
-			PoolTimeout:     100 * time.Millisecond,
-			DialTimeout:     1 * time.Second,
-			ConnMaxIdleTime: -1,
+			Dialer:             dummyDialer,
+			PoolSize:           poolSize,
+			MaxConcurrentDials: poolSize,
+			MinIdleConns:       minIdleConns,
+			PoolTimeout:        100 * time.Millisecond,
+			DialTimeout:        1 * time.Second,
+			ConnMaxIdleTime:    -1,
 		})
 		Eventually(func() int {
 			return connPool.Len()
@@ -309,11 +312,12 @@ var _ = Describe("race", func() {
 
 	It("does not happen on Get, Put, and Remove", func() {
 		connPool = pool.NewConnPool(&pool.Options{
-			Dialer:          dummyDialer,
-			PoolSize:        10,
-			PoolTimeout:     time.Minute,
-			DialTimeout:     1 * time.Second,
-			ConnMaxIdleTime: time.Millisecond,
+			Dialer:             dummyDialer,
+			PoolSize:           10,
+			MaxConcurrentDials: 10,
+			PoolTimeout:        time.Minute,
+			DialTimeout:        1 * time.Second,
+			ConnMaxIdleTime:    time.Millisecond,
 		})
 
 		perform(C, func(id int) {
@@ -340,10 +344,11 @@ var _ = Describe("race", func() {
 			Dialer: func(ctx context.Context) (net.Conn, error) {
 				return &net.TCPConn{}, nil
 			},
-			PoolSize:     1000,
-			MinIdleConns: 50,
-			PoolTimeout:  3 * time.Second,
-			DialTimeout:  1 * time.Second,
+			PoolSize:           1000,
+			MaxConcurrentDials: 1000,
+			MinIdleConns:       50,
+			PoolTimeout:        3 * time.Second,
+			DialTimeout:        1 * time.Second,
 		}
 		p := pool.NewConnPool(opt)
 
@@ -367,8 +372,9 @@ var _ = Describe("race", func() {
 			Dialer: func(ctx context.Context) (net.Conn, error) {
 				panic("test panic")
 			},
-			PoolSize:     100,
-			MinIdleConns: 30,
+			PoolSize:           100,
+			MaxConcurrentDials: 100,
+			MinIdleConns:       30,
 		}
 		p := pool.NewConnPool(opt)
 
@@ -385,8 +391,9 @@ var _ = Describe("race", func() {
 			Dialer: func(ctx context.Context) (net.Conn, error) {
 				return &net.TCPConn{}, nil
 			},
-			PoolSize:    1,
-			PoolTimeout: 3 * time.Second,
+			PoolSize:           1,
+			MaxConcurrentDials: 1,
+			PoolTimeout:        3 * time.Second,
 		}
 		p := pool.NewConnPool(opt)
 
@@ -416,8 +423,9 @@ var _ = Describe("race", func() {
 
 				return &net.TCPConn{}, nil
 			},
-			PoolSize:    1,
-			PoolTimeout: testPoolTimeout,
+			PoolSize:           1,
+			MaxConcurrentDials: 1,
+			PoolTimeout:        testPoolTimeout,
 		}
 		p := pool.NewConnPool(opt)
 
