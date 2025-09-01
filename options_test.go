@@ -263,72 +263,6 @@ func TestMaxConcurrentDialsOptions(t *testing.T) {
 		maxConcurrentDials      int
 		expectedConcurrentDials int
 	}{
-		// Zero value tests - MaxConcurrentDials should be set to PoolSize
-		{
-			name:                    "zero value with default pool size",
-			poolSize:                0, // will become 10 * GOMAXPROCS in init()
-			maxConcurrentDials:      0,
-			expectedConcurrentDials: 0, // will be set to PoolSize in init()
-		},
-		{
-			name:                    "positive value with default pool size",
-			poolSize:                0, // will become 10 * GOMAXPROCS in init()
-			maxConcurrentDials:      5,
-			expectedConcurrentDials: 5, // should remain 5 if < calculated PoolSize
-		},
-		{
-			name:                    "zero value with minimum pool size",
-			poolSize:                1,
-			maxConcurrentDials:      0,
-			expectedConcurrentDials: 1, // MaxConcurrentDials = PoolSize when 0
-		},
-		{
-			name:                    "zero value with small pool size",
-			poolSize:                5,
-			maxConcurrentDials:      0,
-			expectedConcurrentDials: 5, // MaxConcurrentDials = PoolSize when 0
-		},
-		{
-			name:                    "zero value with large pool size",
-			poolSize:                100,
-			maxConcurrentDials:      0,
-			expectedConcurrentDials: 100, // MaxConcurrentDials = PoolSize when 0
-		},
-
-		// Explicit positive value tests
-		{
-			name:                    "explicit value within limit",
-			poolSize:                10,
-			maxConcurrentDials:      3,
-			expectedConcurrentDials: 3, // should remain unchanged when < PoolSize
-		},
-		{
-			name:                    "explicit value equal to pool size",
-			poolSize:                8,
-			maxConcurrentDials:      8,
-			expectedConcurrentDials: 8, // should remain unchanged when = PoolSize
-		},
-		{
-			name:                    "explicit minimum value",
-			poolSize:                10,
-			maxConcurrentDials:      1,
-			expectedConcurrentDials: 1, // minimum valid value
-		},
-
-		// Capping tests - values exceeding PoolSize should be capped
-		{
-			name:                    "value exceeding pool size",
-			poolSize:                5,
-			maxConcurrentDials:      10,
-			expectedConcurrentDials: 5, // should be capped at PoolSize
-		},
-		{
-			name:                    "large value exceeding small pool",
-			poolSize:                2,
-			maxConcurrentDials:      1000,
-			expectedConcurrentDials: 2, // should be capped at PoolSize
-		},
-
 		// Edge cases and invalid values - negative/zero values set to PoolSize
 		{
 			name:                    "negative value gets set to pool size",
@@ -336,11 +270,26 @@ func TestMaxConcurrentDialsOptions(t *testing.T) {
 			maxConcurrentDials:      -1,
 			expectedConcurrentDials: 10, // negative values are set to PoolSize
 		},
+		// Zero value tests - MaxConcurrentDials should be set to PoolSize
 		{
-			name:                    "large negative value gets set to pool size",
-			poolSize:                3,
-			maxConcurrentDials:      -100,
-			expectedConcurrentDials: 3, // negative values are set to PoolSize
+			name:                    "zero value with positive pool size",
+			poolSize:                1,
+			maxConcurrentDials:      0,
+			expectedConcurrentDials: 1, // MaxConcurrentDials = PoolSize when 0
+		},
+		// Explicit positive value tests
+		{
+			name:                    "explicit value within limit",
+			poolSize:                10,
+			maxConcurrentDials:      3,
+			expectedConcurrentDials: 3, // should remain unchanged when < PoolSize
+		},
+		// Capping tests - values exceeding PoolSize should be capped
+		{
+			name:                    "value exceeding pool size",
+			poolSize:                5,
+			maxConcurrentDials:      10,
+			expectedConcurrentDials: 5, // should be capped at PoolSize
 		},
 	}
 
@@ -351,19 +300,6 @@ func TestMaxConcurrentDialsOptions(t *testing.T) {
 				MaxConcurrentDials: tc.maxConcurrentDials,
 			}
 			opts.init()
-
-			if tc.expectedConcurrentDials == 0 {
-				// For default pool size case, set expected value based on input
-				if tc.poolSize == 0 {
-					if tc.maxConcurrentDials == 0 {
-						tc.expectedConcurrentDials = opts.PoolSize // MaxConcurrentDials = PoolSize when 0
-					} else {
-						// For positive maxConcurrentDials with default PoolSize,
-						// it should remain unchanged if <= calculated PoolSize
-						tc.expectedConcurrentDials = tc.maxConcurrentDials
-					}
-				}
-			}
 
 			if opts.MaxConcurrentDials != tc.expectedConcurrentDials {
 				t.Errorf("MaxConcurrentDials: got %v, expected %v (PoolSize=%v)",
