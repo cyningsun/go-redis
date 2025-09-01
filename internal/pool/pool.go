@@ -106,6 +106,28 @@ func (w *wantConn) tryDeliver(cn *Conn, err error) bool {
 	return true
 }
 
+func (w *wantConn) cancel(ctx context.Context, p *ConnPool) {
+	w.mu.Lock()
+	var cn *Conn
+	if w.done {
+		select {
+		case result := <-w.result:
+			cn = result.cn
+		default:
+		}
+	} else {
+		close(w.result)
+	}
+
+	w.done = true
+	w.ctx = nil
+	w.mu.Unlock()
+
+	if cn != nil {
+		p.Put(ctx, cn)
+	}
+}
+
 type wantConnResult struct {
 	cn  *Conn
 	err error
@@ -363,23 +385,29 @@ func (p *ConnPool) asyncNewConn(ctx context.Context) (*Conn, error) {
 		return nil, ctx.Err()
 	}
 
-	dialCtx, cancel := context.WithTimeout(ctx, p.cfg.DialTimeout)
+	dialCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.cfg.DialTimeout)
 
 	w := &wantConn{
 		ctx:       dialCtx,
 		cancelCtx: cancel,
 		result:    make(chan wantConnResult, 1),
 	}
+	var err error
+	defer func() {
+		if err != nil {
+			w.cancel(ctx, p)
+		}
+	}()
 
 	go func(w *wantConn) {
 		defer w.cancelCtx()
 		defer func() { <-p.dialsInProgress }() // Release connection creation permission
 
-		cn, err := p.newConn(w.ctx, true)
-		delivered := w.tryDeliver(cn, err)
-		if err == nil && delivered {
+		cn, cnErr := p.newConn(w.ctx, true)
+		delivered := w.tryDeliver(cn, cnErr)
+		if cnErr == nil && delivered {
 			return
-		} else if err == nil && !delivered {
+		} else if cnErr == nil && !delivered {
 			p.Put(w.ctx, cn)
 		} else { // freeTurn after error
 			p.freeTurn()
@@ -388,9 +416,11 @@ func (p *ConnPool) asyncNewConn(ctx context.Context) (*Conn, error) {
 
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		err = ctx.Err()
+		return nil, err
 	case result := <-w.result:
-		return result.cn, result.err
+		err = result.err
+		return result.cn, err
 	}
 }
 
